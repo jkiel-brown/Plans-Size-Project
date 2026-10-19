@@ -1,0 +1,599 @@
+/* ---- Open the saved dataset ---- */
+libname outlib "P:\cahpr\jkiel1\Plans Project\Output";
+
+data merged_county_final;
+    set outlib.merged_county_final;
+run;
+
+/* ================================================================
+   DXA SCREENING LOW-VALUE CARE MEASURE
+   Women >66, excluding cancer or fragility fracture diagnosed
+   in the 23 months prior to the earliest DXA service
+   ================================================================ */
+
+/* ================= Step 1: raw DXA screening flag (women >66) ================= */
+data merged_county_final;
+    set merged_county_final;
+
+    array proc{5} $ hbrchcp1-hbrchcp5;
+
+    dxa_screen_raw = 0;
+    do i = 1 to 5;
+        if proc{i} in ("0028T","76075","76076","77080","77081","77085","77086") 
+           and hksex = 2 and hkage > 66 
+            then dxa_screen_raw = 1;
+    end;
+
+    drop i;
+run;
+
+/* ================= Step 2: earliest DXA date per beneficiary, and 23-months-prior reference date ================= */
+proc sql;
+    create table bene_first_dxa as
+    select bene_id_18900, min(hbfrom) as first_dxa_date format=date9.
+    from merged_county_final
+    where dxa_screen_raw = 1
+    group by bene_id_18900;
+quit;
+
+data bene_first_dxa;
+    set bene_first_dxa;
+    ref_date_23mo_prior = intnx('month', first_dxa_date, -23, 'same');
+    format ref_date_23mo_prior date9.;
+run;
+
+/* ================= Step 3: flag every 2022 claim in merged_county_final for cancer/fragility ================= */
+data merged_county_final;
+    set merged_county_final;
+
+    array proc{5} $ hbrchcp1-hbrchcp5;
+    array diag{5} $ hbdiag1-hbdiag5;
+
+    cancer_dx = 0;
+    hip_fx_repair_cpt = 0;
+    wrist_humerus_fx_dx = 0;
+    vertebral_fx_dx = 0;
+    upper_ext_imaging_cpt = 0;
+
+    do i = 1 to 5;
+        if substr(diag{i},1,1) = "C" and substr(diag{i},1,3) ne "C44" then cancer_dx = 1;
+        if substr(diag{i},1,4) in ("S526","S525","S621","S620","S422") then wrist_humerus_fx_dx = 1;
+        if substr(diag{i},1,4) in ("S220","S320","M485") then vertebral_fx_dx = 1;
+        if substr(diag{i},1,3) = "T08" then vertebral_fx_dx = 1;
+    end;
+
+    do i = 1 to 5;
+        if "27230" <= proc{i} <= "27248" then hip_fx_repair_cpt = 1;
+        if proc{i} in ("25600","25605","25609","25611") then wrist_humerus_fx_dx = 1;
+        if "23600" <= proc{i} <= "23630" then wrist_humerus_fx_dx = 1;
+        if "23665" <= proc{i} <= "23680" then wrist_humerus_fx_dx = 1;
+        if proc{i} in ("73000","73010","73020","73030","73040","73050",
+                       "73060","73070","73080","73085",
+                       "73090","73092","73100","73110","73115",
+                       "73120","73130","73140",
+                       "73200","73201","73202","73206",
+                       "73218","73219","73220","73221","73222","73223","73225")
+            then upper_ext_imaging_cpt = 1;
+    end;
+
+    drop i;
+run;
+
+/* ================= Step 4: check 2022 -- cancer/fragility, on/before first DXA, back to Jan 1 2022 ================= */
+proc sql;
+    create table claims_2022_dxa_check as
+    select a.*, b.first_dxa_date, b.ref_date_23mo_prior
+    from merged_county_final as a
+    inner join bene_first_dxa as b
+    on a.bene_id_18900 = b.bene_id_18900
+    where a.hbfrom <= b.first_dxa_date;
+quit;
+
+proc sql;
+    create table bene_2022_hip_vert as
+    select distinct bene_id_18900
+    from claims_2022_dxa_check
+    where hip_fx_repair_cpt = 1 or vertebral_fx_dx = 1 or cancer_dx = 1;
+quit;
+
+proc sql;
+    create table wrist_humerus_2022 as
+    select bene_id_18900, hbfrom as fx_date format=date9.
+    from claims_2022_dxa_check
+    where wrist_humerus_fx_dx = 1;
+quit;
+
+proc sql;
+    create table imaging_2022 as
+    select bene_id_18900, hbfrom as img_date format=date9.
+    from claims_2022_dxa_check
+    where upper_ext_imaging_cpt = 1;
+quit;
+
+proc sql;
+    create table bene_2022_wrist_humerus as
+    select distinct a.bene_id_18900
+    from wrist_humerus_2022 as a
+    inner join imaging_2022 as b
+      on a.bene_id_18900 = b.bene_id_18900
+    where abs(a.fx_date - b.img_date) <= 7;
+quit;
+
+proc sql;
+    create table bene_2022_exclusion as
+    select distinct bene_id_18900 from bene_2022_hip_vert
+    outer union corr
+    select distinct bene_id_18900 from bene_2022_wrist_humerus;
+quit;
+
+/* ================= Step 5: list still NOT excluded after the 2022 check ================= */
+proc sql;
+    create table bene_still_dxa_flagged as
+    select a.bene_id_18900, a.ref_date_23mo_prior
+    from bene_first_dxa as a
+    left join bene_2022_exclusion as b
+    on a.bene_id_18900 = b.bene_id_18900
+    where b.bene_id_18900 is null;
+quit;
+
+/* ================= Step 6: 2021 -- diagnosis from Hballenc, procedure from Hballenl (first 5 lines) ================= */
+
+/* 6a: diagnosis codes, 2021 */
+data claims_2021_diag;
+    if _n_ = 0 then set bene_still_dxa_flagged (keep=bene_id_18900 ref_date_23mo_prior);
+
+    if _n_ = 1 then do;
+        declare hash hb(dataset:"bene_still_dxa_flagged(keep=bene_id_18900 ref_date_23mo_prior)");
+        hb.defineKey("bene_id_18900");
+        hb.defineData("ref_date_23mo_prior");
+        hb.defineDone();
+    end;
+
+    set claims.Hballenc_updated_2021 (keep=bene_id_18900 hbclmid hbfrom hbdiag0-hbdiag4);
+
+    rc = hb.find();
+    if rc ne 0 then delete;
+run;
+
+/* 6b: procedure codes, first 5 lines, 2021 */
+data claims_2021_proc;
+    if _n_ = 0 then set bene_still_dxa_flagged (keep=bene_id_18900);
+
+    if _n_ = 1 then do;
+        declare hash hb(dataset:"bene_still_dxa_flagged(keep=bene_id_18900)");
+        hb.defineKey("bene_id_18900");
+        hb.defineDone();
+    end;
+
+    set claims.Hballenl_updated_2021 (keep=bene_id_18900 hbclmid hbrchcp hbrevind);
+
+    where hbrevind <= 5;
+
+    if hb.check() ne 0 then delete;
+run;
+
+proc sort data=claims_2021_proc;
+    by bene_id_18900 hbclmid hbrevind;
+run;
+
+proc transpose data=claims_2021_proc
+                out=claims_2021_proc_wide (drop=_name_)
+                prefix=hbrchcp;
+    by bene_id_18900 hbclmid;
+    id hbrevind;
+    var hbrchcp;
+run;
+
+/* 6c: merge diagnosis + procedure, 2021 */
+proc sort data=claims_2021_diag;
+    by bene_id_18900 hbclmid;
+run;
+
+proc sort data=claims_2021_proc_wide;
+    by bene_id_18900 hbclmid;
+run;
+
+data claims_2021_dxa;
+    merge claims_2021_diag (in=a) claims_2021_proc_wide (in=b);
+    by bene_id_18900 hbclmid;
+    if a;
+run;
+
+/* ---- flag cancer/fragility, 2021 ---- */
+data claims_2021_dxa_flagged;
+    set claims_2021_dxa;
+
+    array diag21{5} $ hbdiag0-hbdiag4;
+    array proc21{5} $ hbrchcp1-hbrchcp5;
+
+    cancer_dx21 = 0;
+    hip_fx21 = 0;
+    wrist_humerus_fx21 = 0;
+    vertebral_fx21 = 0;
+    upper_ext_imaging21 = 0;
+
+    do i = 1 to 5;
+        if substr(diag21{i},1,1) = "C" and substr(diag21{i},1,3) ne "C44" then cancer_dx21 = 1;
+        if substr(diag21{i},1,4) in ("S526","S525","S621","S620","S422") then wrist_humerus_fx21 = 1;
+        if substr(diag21{i},1,4) in ("S220","S320","M485") then vertebral_fx21 = 1;
+        if substr(diag21{i},1,3) = "T08" then vertebral_fx21 = 1;
+
+        if not missing(proc21{i}) then do;
+            if "27230" <= proc21{i} <= "27248" then hip_fx21 = 1;
+            if proc21{i} in ("25600","25605","25609","25611") then wrist_humerus_fx21 = 1;
+            if "23600" <= proc21{i} <= "23630" then wrist_humerus_fx21 = 1;
+            if "23665" <= proc21{i} <= "23680" then wrist_humerus_fx21 = 1;
+            if proc21{i} in ("73000","73010","73020","73030","73040","73050",
+                             "73060","73070","73080","73085",
+                             "73090","73092","73100","73110","73115",
+                             "73120","73130","73140",
+                             "73200","73201","73202","73206",
+                             "73218","73219","73220","73221","73222","73223","73225")
+                then upper_ext_imaging21 = 1;
+        end;
+    end;
+
+    drop i;
+run;
+
+proc sql;
+    create table bene_2021_hip_vert_cancer as
+    select distinct bene_id_18900
+    from claims_2021_dxa_flagged
+    where hip_fx21 = 1 or vertebral_fx21 = 1 or cancer_dx21 = 1;
+quit;
+
+proc sql;
+    create table wrist_humerus_2021 as
+    select bene_id_18900, hbfrom as fx_date format=date9.
+    from claims_2021_dxa_flagged
+    where wrist_humerus_fx21 = 1;
+quit;
+
+proc sql;
+    create table imaging_2021 as
+    select bene_id_18900, hbfrom as img_date format=date9.
+    from claims_2021_dxa_flagged
+    where upper_ext_imaging21 = 1;
+quit;
+
+proc sql;
+    create table bene_2021_wrist_humerus as
+    select distinct a.bene_id_18900
+    from wrist_humerus_2021 as a
+    inner join imaging_2021 as b
+      on a.bene_id_18900 = b.bene_id_18900
+    where abs(a.fx_date - b.img_date) <= 7;
+quit;
+
+proc sql;
+    create table bene_2021_exclusion as
+    select distinct bene_id_18900 from bene_2021_hip_vert_cancer
+    outer union corr
+    select distinct bene_id_18900 from bene_2021_wrist_humerus;
+quit;
+
+/* ================= Step 7: list still NOT excluded after 2021 check ================= */
+proc sql;
+    create table bene_still_dxa_flagged_v2 as
+    select a.bene_id_18900, a.ref_date_23mo_prior
+    from bene_still_dxa_flagged as a
+    left join bene_2021_exclusion as b
+    on a.bene_id_18900 = b.bene_id_18900
+    where b.bene_id_18900 is null;
+quit;
+
+/* ================= Step 8: 2020 -- same split, plus the 23-month cutoff ================= */
+
+/* 8a: diagnosis codes, 2020, restricted to on/before each beneficiary's ref_date_23mo_prior */
+data claims_2020_diag;
+    if _n_ = 0 then set bene_still_dxa_flagged_v2 (keep=bene_id_18900 ref_date_23mo_prior);
+
+    if _n_ = 1 then do;
+        declare hash hb(dataset:"bene_still_dxa_flagged_v2(keep=bene_id_18900 ref_date_23mo_prior)");
+        hb.defineKey("bene_id_18900");
+        hb.defineData("ref_date_23mo_prior");
+        hb.defineDone();
+    end;
+
+    set claims.Hballenc_updated_2020 (keep=bene_id_18900 hbclmid hbfrom hbdiag0-hbdiag4);
+
+    rc = hb.find();
+    if rc ne 0 then delete;
+
+    if hbfrom > ref_date_23mo_prior then delete;
+run;
+
+/* 8b: procedure codes, first 5 lines, 2020 */
+data claims_2020_proc_prelim;
+    if _n_ = 0 then set bene_still_dxa_flagged_v2 (keep=bene_id_18900);
+
+    if _n_ = 1 then do;
+        declare hash hb(dataset:"bene_still_dxa_flagged_v2(keep=bene_id_18900)");
+        hb.defineKey("bene_id_18900");
+        hb.defineDone();
+    end;
+
+    set claims.Hballenl_updated_2020 (keep=bene_id_18900 hbclmid hbrchcp hbrevind);
+
+    where hbrevind <= 5;
+
+    if hb.check() ne 0 then delete;
+run;
+
+proc sql;
+    create table claims_2020_proc as
+    select a.*
+    from claims_2020_proc_prelim as a
+    inner join (select distinct bene_id_18900, hbclmid from claims_2020_diag) as b
+    on a.bene_id_18900 = b.bene_id_18900 and a.hbclmid = b.hbclmid;
+quit;
+
+proc sort data=claims_2020_proc;
+    by bene_id_18900 hbclmid hbrevind;
+run;
+
+proc transpose data=claims_2020_proc
+                out=claims_2020_proc_wide (drop=_name_)
+                prefix=hbrchcp;
+    by bene_id_18900 hbclmid;
+    id hbrevind;
+    var hbrchcp;
+run;
+
+/* 8c: merge diagnosis + procedure, 2020 */
+proc sort data=claims_2020_diag;
+    by bene_id_18900 hbclmid;
+run;
+
+proc sort data=claims_2020_proc_wide;
+    by bene_id_18900 hbclmid;
+run;
+
+data claims_2020_dxa;
+    merge claims_2020_diag (in=a) claims_2020_proc_wide (in=b);
+    by bene_id_18900 hbclmid;
+    if a;
+run;
+
+/* ---- flag cancer/fragility, 2020 ---- */
+data claims_2020_dxa_flagged;
+    set claims_2020_dxa;
+
+    array diag20{5} $ hbdiag0-hbdiag4;
+    array proc20{5} $ hbrchcp1-hbrchcp5;
+
+    cancer_dx20 = 0;
+    hip_fx20 = 0;
+    wrist_humerus_fx20 = 0;
+    vertebral_fx20 = 0;
+    upper_ext_imaging20 = 0;
+
+    do i = 1 to 5;
+        if substr(diag20{i},1,1) = "C" and substr(diag20{i},1,3) ne "C44" then cancer_dx20 = 1;
+        if substr(diag20{i},1,4) in ("S526","S525","S621","S620","S422") then wrist_humerus_fx20 = 1;
+        if substr(diag20{i},1,4) in ("S220","S320","M485") then vertebral_fx20 = 1;
+        if substr(diag20{i},1,3) = "T08" then vertebral_fx20 = 1;
+
+        if not missing(proc20{i}) then do;
+            if "27230" <= proc20{i} <= "27248" then hip_fx20 = 1;
+            if proc20{i} in ("25600","25605","25609","25611") then wrist_humerus_fx20 = 1;
+            if "23600" <= proc20{i} <= "23630" then wrist_humerus_fx20 = 1;
+            if "23665" <= proc20{i} <= "23680" then wrist_humerus_fx20 = 1;
+            if proc20{i} in ("73000","73010","73020","73030","73040","73050",
+                             "73060","73070","73080","73085",
+                             "73090","73092","73100","73110","73115",
+                             "73120","73130","73140",
+                             "73200","73201","73202","73206",
+                             "73218","73219","73220","73221","73222","73223","73225")
+                then upper_ext_imaging20 = 1;
+        end;
+    end;
+
+    drop i;
+run;
+
+proc sql;
+    create table bene_2020_hip_vert_cancer as
+    select distinct bene_id_18900
+    from claims_2020_dxa_flagged
+    where hip_fx20 = 1 or vertebral_fx20 = 1 or cancer_dx20 = 1;
+quit;
+
+proc sql;
+    create table wrist_humerus_2020 as
+    select bene_id_18900, hbfrom as fx_date format=date9.
+    from claims_2020_dxa_flagged
+    where wrist_humerus_fx20 = 1;
+quit;
+
+proc sql;
+    create table imaging_2020 as
+    select bene_id_18900, hbfrom as img_date format=date9.
+    from claims_2020_dxa_flagged
+    where upper_ext_imaging20 = 1;
+quit;
+
+proc sql;
+    create table bene_2020_wrist_humerus as
+    select distinct a.bene_id_18900
+    from wrist_humerus_2020 as a
+    inner join imaging_2020 as b
+      on a.bene_id_18900 = b.bene_id_18900
+    where abs(a.fx_date - b.img_date) <= 7;
+quit;
+
+proc sql;
+    create table bene_2020_exclusion as
+    select distinct bene_id_18900 from bene_2020_hip_vert_cancer
+    outer union corr
+    select distinct bene_id_18900 from bene_2020_wrist_humerus;
+quit;
+
+/* ================= Step 9: combine ALL exclusions (2022 + 2021 + 2020) ================= */
+proc sql;
+    create table bene_dxa_exclusion_all as
+    select distinct bene_id_18900 from bene_2022_exclusion
+    outer union corr
+    select distinct bene_id_18900 from bene_2021_exclusion
+    outer union corr
+    select distinct bene_id_18900 from bene_2020_exclusion;
+quit;
+
+proc sort data=bene_dxa_exclusion_all nodupkey;
+    by bene_id_18900;
+run;
+
+/* ================= Step 10: final flag -- zero out ALL DXA screenings for excluded beneficiaries ================= */
+proc sql;
+    create table merged_county_final as
+    select a.*, 
+           case when b.bene_id_18900 is not null then 1 else 0 end as dxa_exclusion
+    from merged_county_final as a
+    left join bene_dxa_exclusion_all as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+data merged_county_final;
+    set merged_county_final;
+    if dxa_screen_raw = 1 and dxa_exclusion = 0 
+        then dxa_screen_lvc = 1;
+    else dxa_screen_lvc = 0;
+run;
+
+/* ================= Beneficiary-level: anyone with at least one LVC DXA screening ================= */
+proc sql;
+    create table bene_lowvalue_dxa as
+    select bene_id_18900, max(dxa_screen_lvc) as bene_lowvalue_dxa_screen
+    from merged_county_final
+    group by bene_id_18900;
+quit;
+
+/* ================================================================
+   SUMMARY TABLES
+   ================================================================ */
+
+/* ---- 1. Encounter-level summary ---- */
+proc sql;
+    create table dxa_lvc_encounter_summary as
+    select count(*) as N_Total_Encounters,
+           sum(dxa_screen_lvc) as N_LVC_Encounters,
+           round(100 * calculated N_LVC_Encounters / calculated N_Total_Encounters, 0.1) as Pct_LVC_Encounters
+    from merged_county_final;
+quit;
+
+proc print data=dxa_lvc_encounter_summary noobs label;
+    label N_Total_Encounters = "N Total Encounters"
+          N_LVC_Encounters   = "N Low-Value DXA Screenings"
+          Pct_LVC_Encounters = "% of All Encounters";
+run;
+
+/* ---- 2. Beneficiary-level summary, restricted to women >66 ---- */
+proc sql;
+    create table bene_dxa_lvc_elig as
+    select bene_id_18900,
+           max(dxa_screen_lvc) as bene_dxa_lvc_screen
+    from merged_county_final
+    where hksex = 2 and hkage > 66
+    group by bene_id_18900;
+quit;
+
+proc sql;
+    create table dxa_lvc_bene_summary as
+    select count(distinct bene_id_18900) as N_Total_Benes,
+           sum(bene_dxa_lvc_screen) as N_Bene_LVC,
+           round(100 * calculated N_Bene_LVC / calculated N_Total_Benes, 0.1) as Pct_Bene_LVC
+    from bene_dxa_lvc_elig;
+quit;
+
+proc print data=dxa_lvc_bene_summary noobs label;
+    label N_Total_Benes = "N Eligible Beneficiaries (Women >66)"
+          N_Bene_LVC    = "N with >=1 Low-Value DXA Screening"
+          Pct_Bene_LVC  = "% with >=1 Low-Value Screening";
+run;
+
+/* ---- 3. Funnel ---- */
+proc sql;
+    create table dxa_lvc_funnel as
+    select 
+        (select count(distinct bene_id_18900) from merged_county_final where dxa_screen_raw = 1) 
+            as N_Raw_Screened,
+        (select count(distinct bene_id_18900) from bene_2022_exclusion) as N_Excluded_2022,
+        (select count(distinct bene_id_18900) from bene_2021_exclusion) as N_Excluded_2021,
+        (select count(distinct bene_id_18900) from bene_2020_exclusion) as N_Excluded_2020,
+        (select count(distinct bene_id_18900) from merged_county_final where dxa_screen_lvc = 1) 
+            as N_LVC_Final
+    from merged_county_final (obs=1);
+quit;
+
+proc print data=dxa_lvc_funnel noobs label;
+    label N_Raw_Screened   = "N Beneficiaries Screened (Raw)"
+          N_Excluded_2022  = "N Excluded via 2022 Check"
+          N_Excluded_2021  = "N Excluded via 2021 Check"
+          N_Excluded_2020  = "N Excluded via 2020 Check"
+          N_LVC_Final      = "N Remaining (Final LVC)";
+run;
+
+/* ---- 4. Beneficiary-level rollup with size_of_plan/cat, restricted to women >66 ---- */
+proc sql;
+    create table bene_dxa_lvc_plan as
+    select bene_id_18900,
+           max(dxa_screen_lvc) as any_dxa_lvc_screen,
+           max(size_of_plan) as size_of_plan,
+           max(cat) as cat
+    from merged_county_final
+    where hksex = 2 and hkage > 66
+    group by bene_id_18900;
+quit;
+
+proc sql;
+    create table dxa_lvc_by_size as
+    select size_of_plan,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_dxa_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_dxa_lvc_plan
+    group by size_of_plan;
+quit;
+
+proc print data=dxa_lvc_by_size noobs label;
+    label size_of_plan = "Plan Size"
+          N_Total       = "N Eligible Individuals (Women >66)"
+          N_LVC         = "N with Low-Value DXA Screening"
+          Pct_LVC       = "% with Low-Value Screening";
+run;
+
+proc sql;
+    create table dxa_lvc_by_cat as
+    select cat,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_dxa_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_dxa_lvc_plan
+    group by cat;
+quit;
+
+proc print data=dxa_lvc_by_cat noobs label;
+    label cat     = "Category"
+          N_Total = "N Eligible Individuals (Women >66)"
+          N_LVC   = "N with Low-Value DXA Screening"
+          Pct_LVC = "% with Low-Value Screening";
+run;
+
+proc sql;
+    create table dxa_lvc_by_size_cat as
+    select size_of_plan, cat,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_dxa_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_dxa_lvc_plan
+    group by size_of_plan, cat;
+quit;
+
+proc print data=dxa_lvc_by_size_cat noobs label;
+    label size_of_plan = "Plan Size"
+          cat           = "Category"
+          N_Total       = "N Eligible Individuals (Women >66)"
+          N_LVC         = "N with Low-Value DXA Screening"
+          Pct_LVC       = "% with Low-Value Screening";
+run;

@@ -1,0 +1,300 @@
+/* ---- Open the saved dataset ---- */
+libname outlib "P:\cahpr\jkiel1\Plans Project\Output";
+
+data merged_county_final;
+    set outlib.merged_county_final;
+run;
+
+/* ================= Step 1: flag sinus imaging claims and same-claim precluding diagnoses ================= */
+data merged_county_final;
+    set merged_county_final;
+
+    array proc{5} $ hbrchcp1-hbrchcp5;
+    array diag{5} $ hbdiag1-hbdiag5;
+
+    sinus_imaging_code = 0;
+    do i = 1 to 5;
+        if proc{i} in ("70486","70487","70488") then sinus_imaging_code = 1;
+    end;
+
+    sinus_precluding_dx = 0;
+    do i = 1 to 5;
+        if substr(diag{i},1,3) = "J01" then sinus_precluding_dx = 1;   /* acute sinusitis */
+        if substr(diag{i},1,2) = "D8"  then sinus_precluding_dx = 1;   /* immune deficiency */
+        if substr(diag{i},1,3) = "J33" then sinus_precluding_dx = 1;   /* nasal polyps */
+        if substr(diag{i},1,2) = "S0"  then sinus_precluding_dx = 1;   /* head/face injuries */
+        if substr(diag{i},1,3) in ("H00","H01") then sinus_precluding_dx = 1; /* eyelid inflammation */
+        if substr(diag{i},1,4) = "H050" then sinus_precluding_dx = 1;  /* acute orbit inflammation */
+        if substr(diag{i},1,3) = "H53" then sinus_precluding_dx = 1;   /* visual problems */
+    end;
+
+    /* ---- chronic sinusitis diagnosis present on this claim (needed later for date lookups) ---- */
+    chronic_sinusitis_dx = 0;
+    do i = 1 to 5;
+        if substr(diag{i},1,3) = "J32" then chronic_sinusitis_dx = 1;
+    end;
+
+    /* ---- raw flag: imaging present, no precluding diagnosis on the SAME claim ---- */
+    if sinus_imaging_code = 1 and sinus_precluding_dx = 0 
+        then sinus_imaging_raw = 1;
+    else sinus_imaging_raw = 0;
+
+    drop i;
+run;
+
+/* ================= Step 2: earliest qualifying sinus imaging date, per beneficiary ================= */
+proc sql;
+    create table bene_first_sinus_imaging as
+    select bene_id_18900, 
+           min(hbfrom) as first_sinus_imaging_date format=date9.
+    from merged_county_final
+    where sinus_imaging_raw = 1
+    group by bene_id_18900;
+quit;
+
+/* ---- add the "1 year prior" reference date ---- */
+data bene_first_sinus_imaging;
+    set bene_first_sinus_imaging;
+    ref_date_1yr_prior = intnx('year', first_sinus_imaging_date, -1, 'same');
+    format ref_date_1yr_prior date9.;
+run;
+
+/* ================= Step 3: check 2022 data -- chronic sinusitis at least 30 days before imaging ================= */
+proc sql;
+    create table claims_for_2022_check as
+    select a.*, b.first_sinus_imaging_date, b.ref_date_1yr_prior
+    from merged_county_final as a
+    inner join bene_first_sinus_imaging as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+data claims_2022_chronic_flagged;
+    set claims_for_2022_check;
+
+    if chronic_sinusitis_dx = 1 
+       and hbfrom <= (first_sinus_imaging_date - 30)
+    then chronic_2022_precluding = 1;
+    else chronic_2022_precluding = 0;
+run;
+
+proc sql;
+    create table bene_chronic_2022_exclusion as
+    select bene_id_18900, max(chronic_2022_precluding) as chronic_2022_exclusion
+    from claims_2022_chronic_flagged
+    group by bene_id_18900
+    having chronic_2022_exclusion = 1;
+quit;
+
+/* ================= Step 4: preliminary flag after the 2022 chronic-sinusitis check ================= */
+proc sql;
+    create table merged_county_final as
+    select a.*, 
+           case when b.bene_id_18900 is not null then 1 else 0 end as chronic_2022_exclusion
+    from merged_county_final as a
+    left join bene_chronic_2022_exclusion as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+data merged_county_final;
+    set merged_county_final;
+    if sinus_imaging_raw = 1 and chronic_2022_exclusion = 0 
+        then sinus_imaging_step2 = 1;
+    else sinus_imaging_step2 = 0;
+run;
+
+/* ================= Step 5: unique list of beneficiaries STILL flagged, carrying their reference date ================= */
+proc sql;
+    create table bene_still_sinus_flagged as
+    select distinct a.bene_id_18900, b.ref_date_1yr_prior
+    from merged_county_final as a
+    inner join bene_first_sinus_imaging as b
+    on a.bene_id_18900 = b.bene_id_18900
+    where a.sinus_imaging_step2 = 1;
+quit;
+
+/* ================= Step 6: match onto 2021 data, check for chronic sinusitis up to each beneficiary's OWN reference date ================= */
+data claims_2021_sinus_filtered;
+    if _n_ = 0 then set bene_still_sinus_flagged (keep=bene_id_18900 ref_date_1yr_prior);
+
+    if _n_ = 1 then do;
+        declare hash hb(dataset:"bene_still_sinus_flagged(keep=bene_id_18900 ref_date_1yr_prior)");
+        hb.defineKey("bene_id_18900");
+        hb.defineData("ref_date_1yr_prior");
+        hb.defineDone();
+    end;
+
+    set claims.Hballenc_updated_2021 (keep=bene_id_18900 hbfrom hbdiag0-hbdiag4);
+
+    rc = hb.find();
+    if rc ne 0 then delete;   /* not in our still-flagged list */
+run;
+
+data claims_2021_chronic_flagged;
+    set claims_2021_sinus_filtered;
+
+    array diag21{5} $ hbdiag0-hbdiag4;
+
+    chronic_2021_dx = 0;
+    do i = 1 to 5;
+        if substr(diag21{i},1,3) = "J32" then chronic_2021_dx = 1;
+    end;
+
+    /* must be on/before the beneficiary's OWN 1-year-prior reference date */
+    if chronic_2021_dx = 1 and hbfrom <= ref_date_1yr_prior 
+        then chronic_2021_precluding = 1;
+    else chronic_2021_precluding = 0;
+
+    drop i;
+run;
+
+proc sql;
+    create table bene_chronic_2021_exclusion as
+    select distinct bene_id_18900
+    from claims_2021_chronic_flagged
+    where chronic_2021_precluding = 1;
+quit;
+
+/* ================= Step 7: final flag -- zero out ALL sinus imaging for anyone excluded via 2021 chronic sinusitis ================= */
+proc sql;
+    create table merged_county_final as
+    select a.*, 
+           case when b.bene_id_18900 is not null then 1 else 0 end as chronic_2021_exclusion
+    from merged_county_final as a
+    left join bene_chronic_2021_exclusion as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+data merged_county_final;
+    set merged_county_final;
+    if sinus_imaging_step2 = 1 and chronic_2021_exclusion = 0 
+        then sinus_imaging_lvc = 1;
+    else sinus_imaging_lvc = 0;
+run;
+
+/* ================= Beneficiary-level: anyone with at least one LVC sinus imaging claim ================= */
+proc sql;
+    create table bene_lowvalue_sinus as
+    select bene_id_18900, max(sinus_imaging_lvc) as bene_lowvalue_sinus_imaging
+    from merged_county_final
+    group by bene_id_18900;
+quit;
+
+
+/* ================= 1. Encounter-level summary ================= */
+proc sql;
+    create table sinus_lvc_encounter_summary as
+    select count(*) as N_Total_Encounters,
+           sum(sinus_imaging_lvc) as N_LVC_Encounters,
+           round(100 * calculated N_LVC_Encounters / calculated N_Total_Encounters, 0.1) as Pct_LVC_Encounters
+    from merged_county_final;
+quit;
+
+proc print data=sinus_lvc_encounter_summary noobs label;
+    label N_Total_Encounters = "N Total Encounters"
+          N_LVC_Encounters   = "N Low-Value Sinus Imaging Claims"
+          Pct_LVC_Encounters = "% of All Encounters";
+run;
+
+/* ================= 2. Beneficiary-level summary, restricted to those with a qualifying sinus imaging claim ================= */
+proc sql;
+    create table sinus_lvc_bene_summary as
+    select count(distinct a.bene_id_18900) as N_Total_Benes,
+           sum(coalesce(b.bene_lowvalue_sinus_imaging,0)) as N_Bene_LVC,
+           round(100 * calculated N_Bene_LVC / calculated N_Total_Benes, 0.1) as Pct_Bene_LVC
+    from bene_first_sinus_imaging as a
+    left join bene_lowvalue_sinus as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+proc print data=sinus_lvc_bene_summary noobs label;
+    label N_Total_Benes = "N Beneficiaries with Qualifying Sinus Imaging"
+          N_Bene_LVC    = "N with >=1 Low-Value Sinus Imaging Claim"
+          Pct_Bene_LVC  = "% with >=1 Low-Value Claim";
+run;
+
+/* ================= 3. Funnel: raw imaging -> after 2022 chronic check -> after 2021 chronic check (final) ================= */
+proc sql;
+    create table sinus_lvc_funnel as
+    select 
+        (select count(distinct bene_id_18900) from merged_county_final where sinus_imaging_raw = 1) 
+            as N_Raw_Imaging,
+        (select count(distinct bene_id_18900) from merged_county_final where sinus_imaging_step2 = 1) 
+            as N_After_2022_Chronic_Exclusion,
+        (select count(distinct bene_id_18900) from merged_county_final where sinus_imaging_lvc = 1) 
+            as N_After_2021_Chronic_Exclusion
+    from merged_county_final (obs=1);
+quit;
+
+proc print data=sinus_lvc_funnel noobs label;
+    label N_Raw_Imaging                   = "N Beneficiaries with Qualifying Imaging (Raw)"
+          N_After_2022_Chronic_Exclusion  = "N Remaining After 2022 Chronic Sinusitis Exclusion"
+          N_After_2021_Chronic_Exclusion  = "N Remaining After 2021 Chronic Sinusitis Exclusion (Final LVC)";
+run;
+
+/* ================= 4. Beneficiary-level rollup with size_of_plan/cat ================= */
+proc sql;
+    create table bene_sinus_lvc_plan as
+    select a.bene_id_18900,
+           coalesce(b.bene_lowvalue_sinus_imaging, 0) as any_sinus_lvc_screen,
+           max(a.size_of_plan) as size_of_plan,
+           max(a.cat) as cat
+    from merged_county_final as a
+    inner join bene_first_sinus_imaging as c on a.bene_id_18900 = c.bene_id_18900
+    left join bene_lowvalue_sinus as b on a.bene_id_18900 = b.bene_id_18900
+    group by a.bene_id_18900, b.bene_lowvalue_sinus_imaging;
+quit;
+
+/* ---- By size_of_plan ---- */
+proc sql;
+    create table sinus_lvc_by_size as
+    select size_of_plan,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_sinus_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_sinus_lvc_plan
+    group by size_of_plan;
+quit;
+
+proc print data=sinus_lvc_by_size noobs label;
+    label size_of_plan = "Plan Size"
+          N_Total       = "N Individuals with Qualifying Sinus Imaging"
+          N_LVC         = "N with Low-Value Sinus Imaging"
+          Pct_LVC       = "% with Low-Value Imaging";
+run;
+
+/* ---- By cat ---- */
+proc sql;
+    create table sinus_lvc_by_cat as
+    select cat,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_sinus_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_sinus_lvc_plan
+    group by cat;
+quit;
+
+proc print data=sinus_lvc_by_cat noobs label;
+    label cat     = "Category"
+          N_Total = "N Individuals with Qualifying Sinus Imaging"
+          N_LVC   = "N with Low-Value Sinus Imaging"
+          Pct_LVC = "% with Low-Value Imaging";
+run;
+
+/* ---- By size_of_plan x cat ---- */
+proc sql;
+    create table sinus_lvc_by_size_cat as
+    select size_of_plan, cat,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_sinus_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_sinus_lvc_plan
+    group by size_of_plan, cat;
+quit;
+
+proc print data=sinus_lvc_by_size_cat noobs label;
+    label size_of_plan = "Plan Size"
+          cat           = "Category"
+          N_Total       = "N Individuals with Qualifying Sinus Imaging"
+          N_LVC         = "N with Low-Value Sinus Imaging"
+          Pct_LVC       = "% with Low-Value Imaging";
+run;

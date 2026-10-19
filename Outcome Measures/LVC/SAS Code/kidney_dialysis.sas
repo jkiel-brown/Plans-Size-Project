@@ -1,0 +1,216 @@
+/* ---- Open the saved dataset ---- */
+libname outlib "P:\cahpr\jkiel1\Plans Project\Output";
+
+data merged_county_final;
+    set outlib.merged_county_final;
+run;
+
+
+/* ================= Step 1: flag CKD diagnosis and dialysis procedure, per claim ================= */
+data merged_county_final;
+    set merged_county_final;
+
+    array proc{5} $ hbrchcp1-hbrchcp5;
+    array diag{5} $ hbdiag1-hbdiag5;
+
+    ckd_flag = 0;
+    dialysis_flag = 0;
+
+    do i = 1 to 5;
+        if substr(diag{i},1,3) = "N18" then ckd_flag = 1;
+
+        if proc{i} in ("90935","90937","90940","90945","90947","90951","90952","90953",
+                       "90954","90955","90956","90957","90958","90959","90960","90961",
+                       "90962","90963","90964","90965","90966","90967","90968","90969",
+                       "90970","90989","90993","90997","90999")
+            then dialysis_flag = 1;
+    end;
+
+    drop i;
+run;
+
+/* ================= Step 2: earliest CKD date and earliest dialysis date, per beneficiary ================= */
+proc sql;
+    create table bene_ckd_dialysis as
+    select bene_id_18900,
+           min(case when ckd_flag=1 then hbfrom else . end) as first_ckd_date format=date9.,
+           min(case when dialysis_flag=1 then hbfrom else . end) as first_dialysis_date format=date9.
+    from merged_county_final
+    group by bene_id_18900
+    having first_ckd_date is not missing and first_dialysis_date is not missing;
+quit;
+
+/* ================= Step 3: raw combined screening flag (colon/prostate/mammogram/cervical) ================= */
+data merged_county_final;
+    set merged_county_final;
+
+    array proc{5} $ hbrchcp1-hbrchcp5;
+    array diag{5} $ hbdiag1-hbdiag5;
+
+    lvc_screen_raw = 0;
+
+    do i = 1 to 5;
+
+        /* ---- colon: endoscopic CPT codes require modifier "33" ---- */
+        if proc{i} in ("45378","45379","45380","45381","45384","45385","45386",
+                       "45388","45389","45390","45391","45392","45393","45398")
+            and prev_proc_modifier = 1 then lvc_screen_raw = 1;
+
+        if proc{i} in ("G0104","G0105","G0121","G0106","G0120","G0122","G0327") 
+            then lvc_screen_raw = 1;
+
+        /* ---- FOBT ---- */
+        if proc{i} in ("81528","82270","82272","82274","G0464","G0107","G0327","G0328") 
+            then lvc_screen_raw = 1;
+
+        /* ---- other colorectal screening codes ---- */
+        if proc{i} in ("00812","74263","0464U","0537U") then lvc_screen_raw = 1;
+
+        /* ---- prostate ---- */
+        if proc{i} in ("G0102","G0103") then lvc_screen_raw = 1;
+
+        /* ---- mammogram: procedure code OR diagnosis Z123 ---- */
+        if proc{i} in ("77063","77067") then lvc_screen_raw = 1;
+        if substr(diag{i},1,4) = "Z123" then lvc_screen_raw = 1;
+
+        /* ---- cervical ---- */
+        if proc{i} in ("88141","88142","88143","88147","88148","88150","88152","88153",
+                       "88164","88165","88166","88167","88174","88175",
+                       "G0476","G0123","G0124","G0141","G0143","G0144","G0145","G0147",
+                       "G0148","P3000","P3001","Q0091","G0101")
+            then lvc_screen_raw = 1;
+
+    end;
+
+    drop i;
+run;
+
+/* ================= Step 4 (REVISED): left join -- preserves all beneficiaries ================= */
+proc sql;
+    create table merged_county_final as
+    select a.*, b.first_ckd_date, b.first_dialysis_date
+    from merged_county_final as a
+    left join bene_ckd_dialysis as b
+      on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+/* ================= Step 5 (REVISED): final flag -- non-CKD/dialysis beneficiaries simply get lvc_screen=0 ================= */
+data merged_county_final;
+    set merged_county_final;
+
+    if hkage > 75 
+       and not missing(first_ckd_date) 
+       and not missing(first_dialysis_date)
+       and hbfrom > first_ckd_date 
+       and hbfrom > first_dialysis_date
+       and lvc_screen_raw = 1
+    then lvc_screen = 1;
+    else lvc_screen = 0;
+run;
+
+/* ================= Beneficiary-level: anyone with at least one LVC screening ================= */
+proc sql;
+    create table bene_lowvalue_kidney as
+    select bene_id_18900, max(lvc_screen) as bene_lvc_screen
+    from merged_county_final
+    group by bene_id_18900;
+quit;
+
+/* ================= 1. Encounter-level summary: LVC screenings out of all encounters ================= */
+proc sql;
+    create table lvc_kidney_encounter_summary as
+    select count(*) as N_Total_Encounters,
+           sum(lvc_screen) as N_LVC_Encounters,
+           round(100 * calculated N_LVC_Encounters / calculated N_Total_Encounters, 0.1) as Pct_LVC_Encounters
+    from merged_county_final;
+quit;
+
+proc print data=lvc_kidney_encounter_summary noobs label;
+    label N_Total_Encounters = "N Total Encounters"
+          N_LVC_Encounters   = "N Low-Value Screenings (CKD+Dialysis Pop)"
+          Pct_LVC_Encounters = "% of All Encounters";
+run;
+
+/* ================= 2. Beneficiary-level summary, restricted to the eligible population (CKD+dialysis, age >75) ================= */
+proc sql;
+    create table bene_lowvalue_kidney_elig as
+    select bene_id_18900,
+           max(lvc_screen) as bene_lvc_screen
+    from merged_county_final
+    where hkage > 75 
+      and not missing(first_ckd_date) 
+      and not missing(first_dialysis_date)
+    group by bene_id_18900;
+quit;
+
+proc sql;
+    create table lvc_kidney_bene_summary as
+    select count(distinct bene_id_18900) as N_Total_Benes,
+           sum(bene_lvc_screen) as N_Bene_LVC,
+           round(100 * calculated N_Bene_LVC / calculated N_Total_Benes, 0.1) as Pct_Bene_LVC
+    from bene_lowvalue_kidney_elig;
+quit;
+
+proc print data=lvc_kidney_bene_summary noobs label;
+    label N_Total_Benes = "N Eligible Beneficiaries (CKD+Dialysis, Age >75)"
+          N_Bene_LVC    = "N with >=1 Low-Value Screening"
+          Pct_Bene_LVC  = "% with >=1 Low-Value Screening";
+run;
+
+/* ================= 3. Funnel: population narrowing at each stage ================= */
+proc sql;
+    create table lvc_kidney_funnel as
+    select 
+        (select count(distinct bene_id_18900) from merged_county_final 
+            where not missing(first_ckd_date) and not missing(first_dialysis_date)) 
+            as N_CKD_and_Dialysis,
+        (select count(distinct bene_id_18900) from merged_county_final 
+            where not missing(first_ckd_date) and not missing(first_dialysis_date) and hkage > 75) 
+            as N_CKD_Dialysis_Age75,
+        (select count(distinct bene_id_18900) from merged_county_final where lvc_screen = 1) 
+            as N_With_LVC_Screening
+    from merged_county_final (obs=1);
+quit;
+
+proc print data=lvc_kidney_funnel noobs label;
+    label N_CKD_and_Dialysis     = "N Beneficiaries with CKD + Dialysis"
+          N_CKD_Dialysis_Age75   = "N of Those Also Age >75"
+          N_With_LVC_Screening   = "N with >=1 Low-Value Screening (Final)";
+run;
+
+/* ================= 4. Beneficiary-level rollup with size_of_plan/cat, restricted to eligible population ================= */
+proc sql;
+    create table bene_lowvalue_kidney_plan as
+    select bene_id_18900,
+           max(lvc_screen) as any_lvc_screen,
+           max(size_of_plan) as size_of_plan,
+           max(cat) as cat
+    from merged_county_final
+    where hkage > 75 
+      and not missing(first_ckd_date) 
+      and not missing(first_dialysis_date)
+    group by bene_id_18900;
+quit;
+
+/* ---- By size_of_plan ---- */
+proc sql;
+    create table lvc_kidney_by_size as
+    select size_of_plan,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_lowvalue_kidney_plan
+    group by size_of_plan;
+quit;
+
+proc print data=lvc_kidney_by_size noobs label;
+    label size_of_plan = "Plan Size"
+          N_Total       = "N Eligible Individuals (CKD+Dialysis, Age >75)"
+          N_LVC         = "N with Low-Value Screening"
+          Pct_LVC       = "% with Low-Value Screening";
+run;
+
+/* ---- By cat ---- */
+proc sql;
+    create table lvc_kidney_by_cat as
+    select cat,

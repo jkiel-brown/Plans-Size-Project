@@ -1,0 +1,255 @@
+/* ---- Open the saved dataset ---- */
+libname outlib "P:\cahpr\jkiel1\Plans Project\Output";
+
+data merged_county_final;
+    set outlib.merged_county_final;
+run;
+
+/* ================= Step 1: flag LBP diagnosis and back imaging codes, per claim ================= */
+data merged_county_final;
+    set merged_county_final;
+
+    array proc{5} $ hbrchcp1-hbrchcp5;
+    array diag{5} $ hbdiag1-hbdiag5;
+
+    lbp_dx = 0;
+    do i = 1 to 5;
+        if substr(diag{i},1,4) = "M545" then lbp_dx = 1;
+    end;
+
+    back_imaging_code = 0;
+    do i = 1 to 5;
+        if proc{i} in ("72125","72126","72127","72128","72129","72130",
+                       "72131","72132","72133","72141","72142","72156",
+                       "72146","72147","72157","72148","72149","72158","72159",
+                       "72100","72110","72114","72070","72072","72074","72081",
+                       "72082","72085","72084","72052","72040","72050","72080","76705","72120","72200","72220","72202")
+            then back_imaging_code = 1;
+    end;
+
+    /* ---- exclusion diagnosis present on this claim ---- */
+    back_exclusion_dx = 0;
+    do i = 1 to 5;
+        if substr(diag{i},1,1) = "C" then back_exclusion_dx = 1;                   /* cancer */
+        if substr(diag{i},1,3) in ("S22","S24") then back_exclusion_dx = 1;        /* trauma */
+        if substr(diag{i},1,2) = "S3" then back_exclusion_dx = 1;                  /* trauma */
+        if substr(diag{i},1,3) = "I33" then back_exclusion_dx = 1;                 /* endocarditis */
+        if substr(diag{i},1,3) in ("A40","A41") then back_exclusion_dx = 1;        /* sepsis */
+        if substr(diag{i},1,2) = "A1" then back_exclusion_dx = 1;                  /* tuberculosis */
+        if substr(diag{i},1,3) = "M86" then back_exclusion_dx = 1;                 /* osteomyelitis */
+        if substr(diag{i},1,3) = "R50" then back_exclusion_dx = 1;                 /* fever */
+        if substr(diag{i},1,4) = "R634" then back_exclusion_dx = 1;                /* weight loss */
+        if substr(diag{i},1,4) = "R630" then back_exclusion_dx = 1;                /* appetite loss */
+        if substr(diag{i},1,3) = "R61" then back_exclusion_dx = 1;                 /* night sweats */
+        if substr(diag{i},1,3) in ("D60","D61","D62","D63","D64") then back_exclusion_dx = 1; /* anemia */
+    end;
+
+    drop i;
+run;
+
+/* ================= Step 2: first LBP diagnosis date, per beneficiary ================= */
+proc sql;
+    create table bene_first_lbp as
+    select bene_id_18900, min(hbfrom) as first_lbp_date format=date9.
+    from merged_county_final
+    where lbp_dx = 1
+    group by bene_id_18900;
+quit;
+
+/* ================= Step 3: merge first_lbp_date on, flag imaging claims within 6 weeks ================= */
+proc sql;
+    create table merged_county_final as
+    select a.*, b.first_lbp_date
+    from merged_county_final as a
+    left join bene_first_lbp as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+data merged_county_final;
+    set merged_county_final;
+
+    if not missing(first_lbp_date) 
+       and back_imaging_code = 1
+       and hbfrom >= first_lbp_date 
+       and hbfrom <= (first_lbp_date + 42)
+    then back_imaging_raw = 1;
+    else back_imaging_raw = 0;
+run;
+
+/* ================= Step 4: first qualifying imaging date, per beneficiary ================= */
+proc sql;
+    create table bene_first_imaging as
+    select bene_id_18900, min(hbfrom) as first_imaging_date format=date9.
+    from merged_county_final
+    where back_imaging_raw = 1
+    group by bene_id_18900;
+quit;
+
+proc sql;
+    create table merged_county_final as
+    select a.*, b.first_imaging_date
+    from merged_county_final as a
+    left join bene_first_imaging as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+/* ================= Step 5: check for exclusion diagnosis anywhere in [first_lbp_date, first_imaging_date] ================= */
+data claims_for_exclusion_check;
+    set merged_county_final;
+    if not missing(first_lbp_date) and not missing(first_imaging_date)
+       and hbfrom >= first_lbp_date and hbfrom <= first_imaging_date
+    then in_exclusion_window = 1;
+    else in_exclusion_window = 0;
+run;
+
+proc sql;
+    create table bene_back_exclusion as
+    select bene_id_18900, max(back_exclusion_dx) as back_exclusion_present
+    from claims_for_exclusion_check
+    where in_exclusion_window = 1
+    group by bene_id_18900
+    having back_exclusion_present = 1;
+quit;
+
+/* ================= Step 6: final LVC flag -- zero out ALL imaging claims if exclusion found in window ================= */
+proc sql;
+    create table merged_county_final as
+    select a.*, 
+           case when b.bene_id_18900 is not null then 1 else 0 end as back_exclusion_flag
+    from merged_county_final as a
+    left join bene_back_exclusion as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+data merged_county_final;
+    set merged_county_final;
+    if back_imaging_raw = 1 and back_exclusion_flag = 0 
+        then back_imaging_lvc = 1;
+    else back_imaging_lvc = 0;
+run;
+
+/* ================= Beneficiary-level: anyone with at least one LVC back imaging claim ================= */
+proc sql;
+    create table bene_lowvalue_back as
+    select bene_id_18900, max(back_imaging_lvc) as bene_lowvalue_back_imaging
+    from merged_county_final
+    group by bene_id_18900;
+quit;
+
+/* ================= 1. Encounter-level summary ================= */
+proc sql;
+    create table back_lvc_encounter_summary as
+    select count(*) as N_Total_Encounters,
+           sum(back_imaging_lvc) as N_LVC_Encounters,
+           round(100 * calculated N_LVC_Encounters / calculated N_Total_Encounters, 0.1) as Pct_LVC_Encounters
+    from merged_county_final;
+quit;
+
+proc print data=back_lvc_encounter_summary noobs label;
+    label N_Total_Encounters = "N Total Encounters"
+          N_LVC_Encounters   = "N Low-Value Back Imaging Claims"
+          Pct_LVC_Encounters = "% of All Encounters";
+run;
+
+/* ================= 2. Beneficiary-level summary, restricted to those with LBP diagnosis ================= */
+proc sql;
+    create table back_lvc_bene_summary as
+    select count(distinct a.bene_id_18900) as N_Total_Benes,
+           sum(b.bene_lowvalue_back_imaging) as N_Bene_LVC,
+           round(100 * calculated N_Bene_LVC / calculated N_Total_Benes, 0.1) as Pct_Bene_LVC
+    from bene_first_lbp as a
+    left join bene_lowvalue_back as b
+    on a.bene_id_18900 = b.bene_id_18900;
+quit;
+
+proc print data=back_lvc_bene_summary noobs label;
+    label N_Total_Benes = "N Beneficiaries with LBP Diagnosis"
+          N_Bene_LVC    = "N with >=1 Low-Value Back Imaging Claim"
+          Pct_Bene_LVC  = "% with >=1 Low-Value Claim";
+run;
+
+/* ================= 3. Funnel ================= */
+proc sql;
+    create table back_lvc_funnel as
+    select 
+        (select count(distinct bene_id_18900) from bene_first_lbp) as N_With_LBP_Dx,
+        (select count(distinct bene_id_18900) from merged_county_final where back_imaging_raw = 1) 
+            as N_With_Imaging_Within_6wk,
+        (select count(distinct bene_id_18900) from merged_county_final where back_imaging_lvc = 1) 
+            as N_LVC_Final
+    from merged_county_final (obs=1);
+quit;
+
+proc print data=back_lvc_funnel noobs label;
+    label N_With_LBP_Dx             = "N Beneficiaries with LBP Diagnosis"
+          N_With_Imaging_Within_6wk = "N with Imaging Within 6 Weeks"
+          N_LVC_Final               = "N with No Exclusion in Window (Final LVC)";
+run;
+
+/* ================= 4. Beneficiary-level rollup with size_of_plan/cat ================= */
+proc sql;
+    create table bene_back_lvc_plan as
+    select a.bene_id_18900,
+           coalesce(b.bene_lowvalue_back_imaging, 0) as any_back_lvc_screen,
+           max(a.size_of_plan) as size_of_plan,
+           max(a.cat) as cat
+    from merged_county_final as a
+    inner join bene_first_lbp as c on a.bene_id_18900 = c.bene_id_18900
+    left join bene_lowvalue_back as b on a.bene_id_18900 = b.bene_id_18900
+    group by a.bene_id_18900, b.bene_lowvalue_back_imaging;
+quit;
+
+/* ---- By size_of_plan ---- */
+proc sql;
+    create table back_lvc_by_size as
+    select size_of_plan,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_back_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_back_lvc_plan
+    group by size_of_plan;
+quit;
+
+proc print data=back_lvc_by_size noobs label;
+    label size_of_plan = "Plan Size"
+          N_Total       = "N Individuals with LBP Diagnosis"
+          N_LVC         = "N with Low-Value Back Imaging"
+          Pct_LVC       = "% with Low-Value Imaging";
+run;
+
+/* ---- By cat ---- */
+proc sql;
+    create table back_lvc_by_cat as
+    select cat,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_back_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_back_lvc_plan
+    group by cat;
+quit;
+
+proc print data=back_lvc_by_cat noobs label;
+    label cat     = "Category"
+          N_Total = "N Individuals with LBP Diagnosis"
+          N_LVC   = "N with Low-Value Back Imaging"
+          Pct_LVC = "% with Low-Value Imaging";
+run;
+
+/* ---- By size_of_plan x cat ---- */
+proc sql;
+    create table back_lvc_by_size_cat as
+    select size_of_plan, cat,
+           count(distinct bene_id_18900) as N_Total,
+           sum(any_back_lvc_screen) as N_LVC,
+           round(100 * calculated N_LVC / calculated N_Total, 0.1) as Pct_LVC
+    from bene_back_lvc_plan
+    group by size_of_plan, cat;
+quit;
+
+proc print data=back_lvc_by_size_cat noobs label;
+    label size_of_plan = "Plan Size"
+          cat           = "Category"
+          N_Total       = "N Individuals with LBP Diagnosis"
+          N_LVC         = "N with Low-Value Back Imaging"
+          Pct_LVC       = "% with Low-Value Imaging";
+run;
