@@ -1,0 +1,67 @@
+replace head = 1 if procedurecode == "70450" | procedurecode == "70460" | procedurecode == "70470"
+replace head = 1 if procedurecode == "70551"
+replace head = 1 if procedurecode == "70552"
+replace head = 1 if procedurecode == "70553"
+replace head = 1 if procedurecode == "70554"
+replace head = 1 if procedurecode == "70555"
+replace head = 1 if procedurecode == "70556"
+replace head = 1 if procedurecode == "70557"
+
+Headache diagnosis codes start with: "R51"
+
+
+Exclusions:
+
+"I62"*intracranial hemorrage
+
+"I63"
+"G459"
+"I693"
+"Z8673"
+stroke diagnosis codes
+
+"D3611"
+"D233"
+"D234"
+"C760"
+"D333"
+"D332"
+"D331"
+"D330"
+"C71"
+*tumors diagnosis codes
+
+"S0"
+head injury diagnosis codes
+
+"G40"
+epilepsy diagnosis codes
+
+"M315"
+"M316"
+giant cell arteritis diagnosis codes
+
+"R56"
+convulsions diagnosis codes
+
+"R4182"
+altered mental status diagnosis codes
+
+"G81"
+Hemiplegia and hemiparesis diagnosis codes
+
+"R20"
+disturbances of skin sensation diagnosis codes
+
+"R47"
+speech issues diagnosis codes
+
+"G45"
+Transient cerebral ischemic attacks diagnosis codes
+
+"Z8673"
+History of stroke diagnosis codes
+
+"C" cancer
+
+"Z85" history of cancer
