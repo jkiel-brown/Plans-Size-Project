@@ -1,0 +1,104 @@
+Kidney Services procedure codes:
+
+90935
+90937
+90940
+90945
+90947
+90951
+90952
+90953
+90954
+90955
+90956
+90957
+90958
+90959
+90960
+90961
+90962
+90963
+90964
+90965
+90966
+90967
+90968
+90969
+90970
+90989
+90993
+90997
+90999
+
+Chronic Kidney Disease diagnosis codes: starts with N18
+
+
+Colon:
+	gen byte screen=0
+		replace screen=1 if inlist("33", proceduremodifier1, proceduremodifier2, proceduremodifier3, proceduremodifier4) //added precedure modifier that indicated it started as preventive
+		
+		*assign colon cancer screenings
+		gen byte colon=.
+		replace colon = 1 if procedurecode == "45378" & screen==1
+		replace colon = 1 if procedurecode == "45379" & screen==1
+		replace colon = 1 if procedurecode == "45380" & screen==1
+		replace colon = 1 if procedurecode == "45381" & screen==1
+		replace colon = 1 if procedurecode == "45384" & screen==1
+		replace colon = 1 if procedurecode == "45385" & screen==1
+		replace colon = 1 if procedurecode == "45386" & screen==1				
+		replace colon = 1 if procedurecode == "45388" & screen==1
+		replace colon = 1 if procedurecode == "45389" & screen==1
+		replace colon = 1 if procedurecode == "45390" & screen==1
+		replace colon = 1 if procedurecode == "45391" & screen==1
+		replace colon = 1 if procedurecode == "45392" & screen==1
+		replace colon = 1 if procedurecode == "45393" & screen==1
+		replace colon = 1 if procedurecode == "45398" & screen==1 /// endoscopic procedures that started as screenings
+		
+		replace colon = 1 if procedurecode == "G0104"
+		replace colon = 1 if procedurecode == "G0105"
+		replace colon = 1 if procedurecode == "G0121"
+		replace colon = 1 if procedurecode == "G0106"
+		replace colon = 1 if procedurecode == "G0120"
+		replace colon = 1 if procedurecode == "G0122"
+		replace colon = 1 if procedurecode == "G0327" /// colorectal screening codes
+		
+		gen byte fobt = .
+		replace fobt = 1 if procedurecode == "81528"
+		replace fobt = 1 if procedurecode == "82270"
+		replace fobt = 1 if procedurecode == "82272"
+		replace fobt = 1 if procedurecode == "82274"
+		replace fobt = 1 if procedurecode == "G0464"
+		replace fobt = 1 if procedurecode == "G0107"
+		replace fobt = 1 if procedurecode == "G0327"
+		replace fobt = 1 if procedurecode == "G0328" /// fecal blood test screening codes
+		
+		*Other procedure codes*
+		00812 /// Anesthesia for lower intestinal endoscopic procedures, endoscope introduced distal to duodenum; screening colonoscopy
+		74263 /// Computed tomographic (CT) colonography, screening, including image postprocessing
+		0464U /// colorectal screening test
+		0537U /// colorectal screening test	
+
+
+G0102 /// Prostate Cancer Screening
+G0103 /// Prostate Cancer Screening
+
+
+77063 /// screening mammography
+77067 /// screening mammography
+replace mammogram = 1 if substr(principaldiagnosis, 1, 4) == "Z123"
+
+
+G0476 /// cervical cancer screening
+G0123 /// screening pap test
+G0124  /// screening pap test
+G0141 /// screening pap test
+G0143 /// screening pap test
+G0144 /// screening pap test
+G0145 /// screening pap test
+G0147 /// screening pap test
+G0148 /// screening pap test
+P3000 /// screening pap test
+P3001 /// screening pap test
+Q0091 /// screening pap test, includes breast exam
+G0101 /// cervical screening
+88141, 88142, 88143, 88147, 88148, 88150, 88152, 88153, 88164, 88165, 88166, 88167, 88174, 88175
