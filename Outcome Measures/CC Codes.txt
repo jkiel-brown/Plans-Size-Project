@@ -1,0 +1,24 @@
+Screenings
+
+G0476 /// cervical cancer screening
+G0123 /// screening pap test
+G0124  /// screening pap test
+G0141 /// screening pap test
+G0143 /// screening pap test
+G0144 /// screening pap test
+G0145 /// screening pap test
+G0147 /// screening pap test
+G0148 /// screening pap test
+P3000 /// screening pap test
+P3001 /// screening pap test
+Q0091 /// screening pap test, includes breast exam
+G0101 /// cervical screening
+88141, 88142, 88143, 88147, 88148, 88150, 88152, 88153, 88164, 88165, 88166, 88167, 88174, 88175
+
+
+Exclusions:
+
+Starting with C51-C58, female genital cancer
+Starting with N87, dysplasia
+Starting with R876, abnormal cytological findings in specimens from female genital organs
+Starting with R8781 or R8781, positive HPV test
