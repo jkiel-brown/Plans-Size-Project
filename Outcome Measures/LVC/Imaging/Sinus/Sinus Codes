@@ -1,0 +1,15 @@
+*sinus imaging cpt codes: 
+70486
+70487
+70488
+
+Precluding diagnoses associated with sinus imaging claim:
+- Acute sinusitis diagnosis code starts with "J01"
+- Immune deficiency diagnosis code starts with "D8"
+- Nasal polyps diagnosis code starts with "J33"
+- Head/face injuries diagnosis code starts with "S0"
+- Eyelid inflammation diagnosis code starts with "H00" or "H01"
+- Acute inflammation of orbit diagnosis code starts with "H050"
+- Visual problems diagnosis code starts with "H53"
+
+Chronic sinusitis: diagnosis code starts with "J32"
